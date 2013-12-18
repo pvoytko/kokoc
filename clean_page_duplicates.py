@@ -16,6 +16,11 @@ import os
 import os.path
 
 
+# Выводит на консоль сообщение в нужной кодировке
+def printToConsole(msg):
+    print "cpd>> " + msg.encode('cp866')
+
+
 class MyException(Exception):
     pass
 
@@ -23,7 +28,7 @@ class MyException(Exception):
 # Класс заключает в себе всю работу с локальной папкой сайта - создание, загрузка, выгрузка, модификация.
 class HostFolder:
 
-    # Создание локальной папки с сайтом
+    # Инициализируем класс папкой на диске с которой он будет работать.
     def __init__(self, hostFolderFullPath):
         self.hostFolder = hostFolderFullPath
         self.sourceFolder = os.path.join(self.hostFolder, 'source')
@@ -64,14 +69,44 @@ class HostFolder:
             copyDirFromFtp(host, rpath, self.sourceFolder)
 
 
+    # Данная функция: а) инициализирует используемый в других шагах внутренний массив с файлами на обработку.
+    # Создает в папе хоста файл files.txt, содержащий этот список (сотировка по размеру вниз)
+    def createFilesListing(self):
+
+        # Список полных имен файлов для последующей обработки (используется в других методах)
+        self.filesListing = []
+
+        # Шаг 1 - находим все файлы по маске и получаем их размер
+        walkResult = os.walk(self.sourceFolder)
+        from collections import namedtuple
+        FileRecord = namedtuple('FileRecord', 'name size')
+        filesForProcess = []
+        for r in walkResult:
+            walkDir = r[0]
+            walkDirFiles = r[2]
+            for f in walkDirFiles:
+
+                # Берем только файлы html и php
+                fname = os.path.join(walkDir, f)
+                fext = os.path.splitext(fname)[1]
+                if fext.lower() in ('.php', '.html', '.htm'):
+                    filesForProcess.append(FileRecord(name = fname, size = os.path.getsize(fname)))
+
+        # Шаг 2 - сортируем по возрастанию размера
+        filesForProcess = sorted(filesForProcess, lambda a, b: cmp(a.size, b.size))
+
+        # Шаг 3 - сохраняем во внутренний список и в файл на диск.
+        self.filesListing = [f.name for f in filesForProcess]
+        filesListingPath = os.path.join(self.hostFolder, 'files.txt')
+        with open(filesListingPath, 'w') as fileFiles:
+            for f in filesForProcess:
+                relname = os.path.relpath(f.name, self.sourceFolder)
+                fileFiles.write( u"{0}\t{1}\n".format(f.size, relname) )
+
 
 import sys
 import argparse
-
-
-# Выводит на консоль сообщение в нужной кодировке
-def printToConsole(msg):
-    print "cpd>> " + msg.encode('cp866')
+import os.path
 
 
 # Поддерживаемые аргументы
@@ -97,14 +132,22 @@ else:
     try:
 
         # Создаем класс для работы с локальной папкой сайта
-        f = HostFolder(u"D:\\Dropbox\\Кокос\\test.ru")
+        scriptPath = os.path.dirname(os.path.abspath(__file__))
+        f = HostFolder(os.path.join(scriptPath, args.host))
 
         # Загрузка сайта если не указан аргумент пропуска загрузки
         if args.skip_download:
             printToConsole(u'Загрузка сайта пропущена.')
         else:
-            printToConsole(u'Загрузка сайта начата.')
+            printToConsole(u'Начинаем загрузку сайта.')
             f.download(args.host, args.login, args.password, args.remote_dir)
+
+        # Создаем листинг файлов
+        printToConsole(u'Создаем листинг "{0}/files.txt".'.format(args.host))
+        f.createFilesListing()
+
+        # Обработка
+        print '\n'.join(f.filesListing)
 
 
     # Возникла ошибка - выводим ее и выходим
