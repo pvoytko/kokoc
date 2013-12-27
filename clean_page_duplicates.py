@@ -365,7 +365,6 @@ class HostFolder:
 
         # Делаем нужную подпапку
         os.makedirs(self.sourceFolder)
-        os.makedirs(self.backrefsFolder)
 
         # Устанавливаем соединнеие и загружаем
         with ftputil.FTPHost(host, user, password) as host:
