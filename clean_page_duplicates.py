@@ -312,7 +312,7 @@ def copyDirToFtp(ftpHostObj, lpath, rpath, skipReplace):
             # Если это папка - создаем ее и рекурсивно вызываем копирование
             if os.path.isdir(localPathNew):
                 ftpHostObj.mkdir(remotePathNew)
-                _copyDirContentToFtp(ftpHostObj, localPathNew, remotePathNew)
+                counter = _copyDirContentToFtp(ftpHostObj, localPathNew, remotePathNew, counter)
 
         return counter
 
@@ -543,13 +543,13 @@ class HostFolder:
             printToConsole(u'\tНайдено {1} дублей для "{0}". Осталось файлов для сравнения: {2}'.format(
                 candidateNameRel,
                 ('+' + str(dupCount) + '+') if dupCount > 0 else '-0-',
-                len(self.dupCanditateListing)-1
+                max(len(self.dupCanditateListing)-1, 0)
             ))
 
         # Теперь - сохраняем в duplicates.txt список дублей.
         dupLogger = Logger(self.duplicatesListingPath, 'Duplicate', 'Original')
         for duplicateNameRel, originalNameRel in self.duplicatesListing.iteritems():
-            dupLogger.write(duplicateName, originalName)
+            dupLogger.write(duplicateNameRel, originalNameRel)
 
         # А в папку duplicates копируем оригинальные файлы
         for originalNameRel in self.originalListing:
