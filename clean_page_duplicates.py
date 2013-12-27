@@ -3,12 +3,13 @@
 """
 clean_page_duplicates.py -h host.ru -l login -p password -r /www/host.ru/htdocs [-d] [-u]
 
- -h (--host)                   - адрес к FTP-серверу, где размещен сайт
- -l (--login)                    - имя FTP-пользователя
+ -h (--host)              - адрес к FTP-серверу, где размещен сайт
+ -l (--login)             - имя FTP-пользователя
  -p (--password)          - пароль FTP-пользователя
  -r (--remote-path)       - путь к папке на FTP, где лежат файлы с сайтом
- -d (--skip-download)  - пропустить стадию скачивания сайта
+ -d (--skip-download)     - пропустить стадию скачивания сайта
  -u (--skip-upload)       - пропустить стадию закачки результатов на сайт
+ -e (--skip-replace)      - пропустить, после закачки во временную папку, ее перемещение на место исходной.
 """
 
 
@@ -16,11 +17,13 @@ import os
 import os.path
 import urlparse
 import shutil
+import ftputil
 
 
-# Выводит на консоль сообщение в нужной кодировке
+# Выводит на консоль в STDOUT сообщение в нужной кодировке (в зависимости от патформы)
 def printToConsole(msg):
-    print "cpd>> " + msg.encode('cp866')
+    import platform
+    print "cpd>> " + (msg.encode('cp866') if platform.system() == 'Windows' else msg.encode('koi8-r'))
 
 
 # Класс ошибки, генерируемой этим скриптом.
@@ -38,6 +41,28 @@ def createDirIfNotExists(dirPath):
 def assertDirNotExists(dirPath):
     if os.path.isdir(dirPath):
         raise MyException(u'Папка "{0}" уже существует, возможно наложение результатов, скрипт остановлен.'.format(dirPath))
+
+
+# Получая относительный путь до файла превращает его в относительный УРЛ (относительно корня сайта)
+# Аргумент должен имть вид: folder/file.txt (без начального слеша)
+def makeUrlFromFileRelPath(fileRelPath):
+    if fileRelPath.startswith('/') or fileRelPath.startswith('\\'):
+        raise RuntimeError('Unexpected usage of this function.')
+    return '/' + fileRelPath.replace('\\', '/')
+
+
+
+# Создает папки до файла и сам пустой файл.
+# Если файл есть, то перезаписывает его!
+def createEmptyFileWithDirs(filePath):
+
+    # Делаем папки
+    fileDirs = os.path.dirname(filePath)
+    createDirIfNotExists(fileDirs)
+
+    # Перезаписываем пустым если файл уже есть.
+    with open(filePath, 'w') as fObj:
+        pass
 
 
 # Логгер. Позволяет сформировать файл-список из строк, каждая из которых состоит из нескольких значений.
@@ -68,24 +93,6 @@ class Logger(object):
 
         # Запись
         self._file.write(self._formatStr.format(*fieldValues))
-
-
-# Получая относительный путь до файла превращает его в относительный УРЛ (относительно корня сайта)
-def makeUrlFromFileRelPath(fileRelPath):
-    return '/' + fileRelPath.replace('\\', '/')
-
-
-# Создает папки до файла и сам пустой файл.
-# Если файл есть, то перезаписывает его!
-def createEmptyFileWithDirs(filePath):
-
-    # Делаем папки
-    fileDirs = os.path.dirname(filePath)
-    createDirIfNotExists(fileDirs)
-
-    # Перезаписываем пустым если файл уже есть.
-    with open(filePath, 'w') as fObj:
-        pass
 
 
 # Класс позволяет пройти все anchor-элеметы в заданном HTML
@@ -188,6 +195,137 @@ class AnchorIterator:
         return result
 
 
+# Получая пути до 2 файлов - определяют являются ли они дубликатами.
+# Возвраащет тюпл
+#    True/False - дубликаты ли эти 2 файла
+#    строка - содержимое diff-выдачи (только если размер файлов отличается < 5%)
+def checkDuplicates(pathA, pathB):
+
+    # 2 части результирующего тюпла
+    isDup = False
+    diffContent = ""
+
+    # Вычисляем на сколь отличаются размеры файлв
+    sizeA = os.path.getsize(pathA)
+    sizeB = os.path.getsize(pathB)
+    sizeDelta = abs(sizeB - sizeA)*1.0 / min(sizeA, sizeB)
+
+    # Если более чем на 5% - они не дубли, выходим, иначе - идем внутрь.
+    if sizeDelta <= 0.05:
+
+        # Если размер diff-выдачи более 5% - они не дубли.
+        # Получаем строки diff-выдачи (+ и - строки).
+        # Если в строке различаются только несколько символов, то мы берем не всю строку, а лишь эти разные символы.
+        # DIFF в этом случае после изменившейся строки вставляет еще одну, начинающуюся с ?
+        import difflib
+        fileA = open(pathA, 'r')
+        fileB = open(pathB, 'r')
+        diffLines = []
+        for l in difflib.ndiff(fileA.readlines(), fileB.readlines()):
+
+            # Добавляем строку если она + или - - целиком
+            if l.startswith('+') or l.startswith('-'):
+                diffLines.append(l)
+
+            # А если попадается строка "?"
+            # То в ранее добавленной удаляем все символы в тех места в которых в этой строке (?) пробел
+            # Тем самым оставляем только изменившиеся символы.
+            # Вот пример строк из диффа:
+            # -  <a href="prod21702170.php?rc=1209360495&amp;pc=1209361756&amp;pf=1209361756_1209360495"><img width="208" border="0" src="prodpic/1209361756_1209360495.jpg"></a><br><br>
+            # ?               ^ ^^^ ^^               --              -- ^              -- ^         --                                                 -- ^         --
+            # +  <a href="proda1dfa1df.php?rc=1209369057&amp;pc=1209377926&amp;pf=1209377926_1209369057"><img width="208" border="0" src="prodpic/1209377926_1209369057.jpg"></a><br><br>
+            # ?               ^ ^^^ ^^              +  +              ^^^               ^^^        +  +                                                 ^^^        +  +
+            # - <p align="left"><b><u>HAMM -3518</u></b></p>
+            # ?                       ^ ^^^^^^
+            # + <p align="left"><b><u>MAN 18.413 –TGA XLX</u></b></p>
+            # ?                       ^ ^^  +++++++++++++
+            if l.startswith('?'):
+                lastLine = diffLines[len(diffLines)-1]
+                newLastLine = ''
+                for n, c in enumerate(l):
+                    if c == ' ':
+                        newLastLine += ' '
+                    else:
+                        newLastLine += lastLine[n]
+                diffLines[len(diffLines)-1] = newLastLine.replace(' ', '')
+
+        # Вычисляем размер в байтатх дифф-выдачи и % от мин размера файлов.
+        diffContent = ''.join(diffLines)
+        diffSizeDelta = len(diffContent)*1.0 / min(sizeA, sizeB)
+
+        # Если он меньше 5% - файлы дубли
+        if diffSizeDelta < 0.05:
+            isDup = True
+
+    # Итог.
+    return isDup, diffContent
+
+
+# Загрузить удаленную папку с ФТП в локальную, рекурсивно
+def copyDirFromFtp(ftpHostObj, rpath, lpath, counter):
+    createDirIfNotExists(lpath)
+    names = ftpHostObj.listdir(rpath)
+    for name in names:
+        remote_path = ftpHostObj.path.join(rpath, name)
+        local_path = os.path.join(lpath, name)
+        if ftpHostObj.path.isfile(remote_path):
+            ftpHostObj.download(remote_path, local_path)
+            printToConsole(u"\tЗакачка {0} ".format(counter) + remote_path)
+            counter = counter + 1
+        if ftpHostObj.path.isdir(remote_path):
+            counter = copyDirFromFtp(ftpHostObj, remote_path, local_path, counter)
+    return counter
+
+
+# Загрузить локальную папку на место удаленной
+# skipReplace - тогда пропустить шаг когда временная папка в которую все выгрузили ставится на мсто реальной.
+def copyDirToFtp(ftpHostObj, lpath, rpath, skipReplace):
+
+    # Шаг 1 - определяем свободное имя папки и создаем ее
+    cntr = 0
+    while True:
+        cntr += 1
+        tmpRemoteFolderName = rpath + "_" + str(cntr)
+        if not ftpHostObj.path.exists(tmpRemoteFolderName):
+            break
+    ftpHostObj.mkdir(tmpRemoteFolderName)
+    printToConsole(u'\tВременная папка для выгрузки: {0}'.format(tmpRemoteFolderName))
+
+    # Шаг 2 - выгружаем туда сайт, рекурсивно вызываем функцию:
+    # Загрузка всего из локальной папки в существующую удаленную папку
+    def _copyDirContentToFtp(ftpHostObj, localPath, remotePath, counter):
+
+        # Для каждого файла и папки
+        for name in os.listdir(localPath):
+            localPathNew = os.path.join(localPath, name)
+            remotePathNew = ftpHostObj.path.join(remotePath, name)
+
+            # Если это файл - копируем его
+            if os.path.isfile(localPathNew):
+                ftpHostObj.upload(localPathNew, remotePathNew)
+                printToConsole(u"\tАплоад {0} ".format(counter) + remotePathNew)
+                counter = counter + 1
+
+            # Если это папка - создаем ее и рекурсивно вызываем копирование
+            if os.path.isdir(localPathNew):
+                ftpHostObj.mkdir(remotePathNew)
+                _copyDirContentToFtp(ftpHostObj, localPathNew, remotePathNew)
+
+        return counter
+
+    _copyDirContentToFtp(ftpHostObj, lpath, tmpRemoteFolderName, 1)
+
+    # Если не указан флаг -e скрипту, то поставить временную папку на место исходной.
+    if not skipReplace:
+
+        # Шаг 3 - удаляем старую папку
+        ftpHostObj.rmtree(rpath)
+
+        # Шаг 4 - на ее место переименовываем вновь выгруженную
+        ftpHostObj.rename(tmpRemoteFolderName, rpath)
+
+
+
 # Класс заключает в себе всю работу с локальной папкой сайта - создание, загрузка, выгрузка, модификация.
 class HostFolder:
 
@@ -201,6 +339,14 @@ class HostFolder:
         self.duplicatesListingPath = os.path.join(self.hostFolder, 'duplicates.txt')
         self.duplicatesFolder = os.path.join(self.hostFolder, 'duplicates')
         self.destFolder = os.path.join(self.hostFolder, 'dest')
+
+        # Список относительных имен файлов для последующей обработки (используется в других методах)
+        self.filesListing = []
+
+        # Словарь дубликаторв. Ключ = путь до дубликата. Значение = путь до оригинала.
+        # Оригиналом из 2 файлов считается тот, до которого мы дошли первым в цикле ниже.
+        self.duplicatesListing = {}
+
 
     # Возвращает относительный путь от папки хоста
     def relpath(self, fullPath):
@@ -221,33 +367,14 @@ class HostFolder:
         os.makedirs(self.sourceFolder)
         os.makedirs(self.backrefsFolder)
 
-        # Загрузка через ФТП
-        import ftputil
-
-        # Загрузить удаленную папку с ФТП в локальную, рекурсивно
-        def copyDirFromFtp(host, rpath, lpath):
-            createDirIfNotExists(lpath)
-            names = host.listdir(rpath)
-            for name in names:
-                remote_path = host.path.join(rpath, name)
-                local_path = os.path.join(lpath, name)
-                if host.path.isfile(remote_path):
-                    host.download(remote_path, local_path)
-                    printToConsole(remote_path)
-                if host.path.isdir(remote_path):
-                    copyDirFromFtp(host, remote_path, local_path)
-
         # Устанавливаем соединнеие и загружаем
         with ftputil.FTPHost(host, user, password) as host:
-            copyDirFromFtp(host, rpath, self.sourceFolder)
+            copyDirFromFtp(host, rpath, self.sourceFolder, 1)
 
 
     # Данная функция: а) инициализирует используемый в других шагах внутренний массив с файлами на обработку.
     # Создает в папе хоста файл files.txt, содержащий этот список (сотировка по размеру, возрастающая)
     def createFilesListing(self):
-
-        # Список относительных имен файлов для последующей обработки (используется в других методах)
-        self.filesListing = []
 
         # Проверяем, если исходной папки на диске нет - выдаем ошибку.
         if not os.path.isdir(self.sourceFolder):
@@ -278,7 +405,7 @@ class HostFolder:
         # Сохраняем файл на диск
         filesLogger = Logger(self.filesListingPath, 'Size', 'Relative file path')
         for f in filesForProcess:
-            filesLogger.write(f.size, os.path.relpath(f.name, self.sourceFolder))
+            filesLogger.write(f.size, self.srcRelpath(f.name))
 
 
     # Данная функция создает каталог обратных сылок.
@@ -356,83 +483,15 @@ class HostFolder:
     # папку оригинальных файлов (называется duplicates),
     def createDuplicates(self):
 
-        # Получая пути до 2 файлов - возвращает True если они дубликаты.
-        def checkDuplicates(diffLogger, diffCounter, pathA, pathB):
-
-            result = False
-            diff = ""
-
-            # Если размеры файлов (второго от первого) отличаются > 5% - они не дубли
-            sizeA = os.path.getsize(pathA)
-            sizeB = os.path.getsize(pathB)
-            sizeDelta = abs(sizeB - sizeA)*1.0 / min(sizeA, sizeB)
-            if sizeDelta <= 0.05:
-
-                # Если размер патч-файла более 5% - они не дубли.
-                # Определяем патч-файл. Сохраняем его в папку.
-                import difflib
-                fileA = open(pathA, 'r')
-                fileB = open(pathB, 'r')
-
-                # Определяем отличающиеся символы
-                diffLines = []
-                for l in difflib.ndiff(fileA.readlines(), fileB.readlines()):
-
-                    # Добавляем строку
-                    if l.startswith('+') or l.startswith('-'):
-                        diffLines.append(l)
-
-                    # Если попадается строка ?
-                    # То в ранее добавленной удаляем все символы когда в этой пробел
-                    # Тем самым оставляем только изменившиеся символы.
-                    # Вот пример строк из диффа:
-                    # -  <a href="prod21702170.php?rc=1209360495&amp;pc=1209361756&amp;pf=1209361756_1209360495"><img width="208" border="0" src="prodpic/1209361756_1209360495.jpg"></a><br><br>
-                    # ?               ^ ^^^ ^^               --              -- ^              -- ^         --                                                 -- ^         --
-                    # +  <a href="proda1dfa1df.php?rc=1209369057&amp;pc=1209377926&amp;pf=1209377926_1209369057"><img width="208" border="0" src="prodpic/1209377926_1209369057.jpg"></a><br><br>
-                    # ?               ^ ^^^ ^^              +  +              ^^^               ^^^        +  +                                                 ^^^        +  +
-                    # - <p align="left"><b><u>HAMM -3518</u></b></p>
-                    # ?                       ^ ^^^^^^
-                    # + <p align="left"><b><u>MAN 18.413 –TGA XLX</u></b></p>
-                    # ?                       ^ ^^  +++++++++++++
-                    if l.startswith('?'):
-                        lastLine = diffLines[len(diffLines)-1]
-                        newLastLine = ''
-                        for n, c in enumerate(l):
-                            if c == ' ':
-                                newLastLine += ' '
-                            else:
-                                newLastLine += lastLine[n]
-                        diffLines[len(diffLines)-1] = newLastLine.replace(' ', '')
-
-                diff = ''.join(diffLines)
-                diffSizeDelta = len(diff)*1.0 / min(sizeA, sizeB)
-                if diffSizeDelta < 0.05:
-
-                    result = True
-
-                diffLogger.write(diffCounter, self.srcRelpath(pathA), self.srcRelpath(pathB), result)
-
-                # Пишем файл дифф в папку (для отладки)
-                # Только если размеры меньше 5%, иначе много пустых файлов образуется.
-                if len(diff) > 0:
-                    createDirIfNotExists(os.path.join(self.hostFolder, 'diff'))
-                    with open(os.path.join(self.hostFolder, 'diff', str(diffCounter) + '.txt'), 'w') as fObj:
-                        fObj.write(diff)
-
-            return result
-
         # Проверка что папки нет
         assertDirNotExists(self.duplicatesFolder)
-
-        # Словарь дубликаторв. Ключ = путь до дубликата. Значение = путь до оригинала.
-        # Оригиналом из 2 файлов считается тот, до которого мы дошли первым в цикле ниже.
-        self.duplicatesListing = {}
 
         # Тут листинг файлов, не включая дубли. Как только нашли дубль - удалеяем из его этого списка.
         # Важно именно скопировать исходный список а не получить ссылку. Поэтому используем list()
         self.originalListing = list()
         self.dupCanditateListing = list(self.filesListing)
 
+        createDirIfNotExists(os.path.join(self.hostFolder, 'diff'))
         diffLogger = Logger(os.path.join(self.hostFolder, 'diff.txt'), 'N', 'FileA', 'FileB', 'Duplicates')
         diffCounter = 0
 
@@ -450,20 +509,35 @@ class HostFolder:
             for duplicateNameRel in reversed(self.dupCanditateListing[1:]):
                 duplicateName = os.path.join(self.sourceFolder, duplicateNameRel)
 
+                # Проверяем на дубликатность
                 diffCounter += 1
-                if checkDuplicates(diffLogger, diffCounter, candidateName, duplicateName):
+                isDup, diffContent = checkDuplicates(candidateName, duplicateName)
+
+                # Логируем итог сравнения с дубликатами.
+                diffLogger.write(diffCounter, self.srcRelpath(candidateNameRel), duplicateNameRel, isDup)
+
+                # Пишем файл дифф в папку (для отладки)
+                # Только если дифф есть, иначе много пустых файлов образуется.
+                if len(diffContent) > 0:
+                    with open(os.path.join(self.hostFolder, 'diff', str(diffCounter) + '.txt'), 'w') as fObj:
+                        fObj.write(diffContent)
+
+                # Если файлы дубликаты, то:
+                # сохраняем в словарь дубликатов и удаляем дубликат из рассмотрения.
+                if isDup:
                     self.duplicatesListing[duplicateNameRel] = candidateNameRel
                     self.dupCanditateListing.remove(duplicateNameRel)
                     dupCount += 1
 
-            # Если не было дубликата то это оригинал
+            # Если не было дубликата то это уникальный файл.
             if dupCount == 0:
                 self.originalListing.append(candidateNameRel)
 
             # В любом случае этот файл больше не рассматриваем.
             self.dupCanditateListing.remove(candidateNameRel)
 
-            printToConsole(u'{1} дублей найдено для "{0}". Файлов для сравнения осталось: {2}'.format(
+            # В консоль выводим промежуточный итог (ччтобы видеть как долго идет работа)
+            printToConsole(u'\tНайдено {1} дублей для "{0}". Осталось файлов для сравнения: {2}'.format(
                 candidateNameRel,
                 ('+' + str(dupCount) + '+') if dupCount > 0 else '-0-',
                 len(self.dupCanditateListing)-1
@@ -569,6 +643,12 @@ class HostFolder:
                 for d in self.duplicatesListing.keys():
                     fObj.write("Disallow: " + makeUrlFromFileRelPath(d) + "\n")
 
+    # Загрузка результирующего каталога - обратно
+    def upload(self, host, user, password, rpath, skipReplace):
+
+        # Устанавливаем соединнеие и загружаем
+        with ftputil.FTPHost(host, user, password) as host:
+            copyDirToFtp(host,self.destFolder,  rpath, skipReplace)
 
 
 import sys
@@ -584,6 +664,7 @@ parser.add_argument("-p", "--password", required = True)
 parser.add_argument("-r", "--remote-dir", required = True)
 parser.add_argument("-d", "--skip-download", nargs='?', default=False, const=True, type=bool)
 parser.add_argument("-u", "--skip-upload", nargs='?', default=False, const=True, type=bool)
+parser.add_argument("-e", "--skip-replace", nargs='?', default=False, const=True, type=bool)
 
 # Если аргументов не указано - выводим справку
 if len(sys.argv) == 1:
@@ -615,7 +696,7 @@ else:
 
         # Создаем каталог с обратными ссылками.
         printToConsole(u'Создаем папку обратных ссылок "{0}"'.format(f.relpath(f.backrefsFolder)))
-        # f.createBackrefs()
+        f.createBackrefs()
 
         # Создаем листинг дубликатов
         printToConsole(u'Создаем папку "{0}" и листинг "{1}"'.format(
@@ -633,6 +714,13 @@ else:
 
         printToConsole(u'Создаем файл robots.txt')
         f.createRobotsTxt()
+
+        # Загрузка сайта если не указан аргумент пропуска загрузки
+        if args.skip_upload:
+            printToConsole(u'Аплоад сайта {0} пропущен (указан флаг пропустить)'.format(args.host))
+        else:
+            printToConsole(u'Аплоад сайта {0}'.format(args.host))
+            f.upload(args.host, args.login, args.password, args.remote_dir, args.skip_replace)
 
     # Возникла ошибка - выводим ее и выходим
     except MyException, err:
