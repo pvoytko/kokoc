@@ -197,12 +197,12 @@ class AnchorIterator:
 
 # Получая пути до 2 файлов - определяют являются ли они дубликатами.
 # Возвраащет тюпл
-#    True/False - дубликаты ли эти 2 файла
+#    строка - результат сравнения. "S" - размер файлов разный. "D" - дубли. "F" - diff разный.
 #    строка - содержимое diff-выдачи (только если размер файлов отличается < 5%)
 def checkDuplicates(pathA, pathB):
 
     # 2 части результирующего тюпла
-    isDup = False
+    checkRes = "S"
     diffContent = ""
 
     # Вычисляем на сколь отличаются размеры файлв
@@ -255,10 +255,13 @@ def checkDuplicates(pathA, pathB):
 
         # Если он меньше 5% - файлы дубли
         if diffSizeDelta < 0.05:
-            isDup = True
+            checkRes = "D"
+
+        else:
+            checkRes = "F"
 
     # Итог.
-    return isDup, diffContent
+    return checkRes, diffContent
 
 
 # Загрузить удаленную папку с ФТП в локальную, рекурсивно
@@ -491,7 +494,7 @@ class HostFolder:
         self.dupCanditateListing = list(self.filesListing)
 
         createDirIfNotExists(os.path.join(self.hostFolder, 'diff'))
-        diffLogger = Logger(os.path.join(self.hostFolder, 'diff.txt'), 'N', 'FileA', 'FileB', 'Duplicates')
+        diffLogger = Logger(os.path.join(self.hostFolder, 'diff.txt'), 'N', 'FileA', 'FileB', 'Duplicates(D)')
         diffCounter = 0
 
         # Цель данного блока ниже - из всего списка файлов найти файлы которые являются дублями и файлы
@@ -510,10 +513,11 @@ class HostFolder:
 
                 # Проверяем на дубликатность
                 diffCounter += 1
-                isDup, diffContent = checkDuplicates(candidateName, duplicateName)
+                checkRes, diffContent = checkDuplicates(candidateName, duplicateName)
+                isDup = checkRes == "D"
 
                 # Логируем итог сравнения с дубликатами.
-                diffLogger.write(diffCounter, self.srcRelpath(candidateNameRel), duplicateNameRel, isDup)
+                diffLogger.write(diffCounter, candidateNameRel, duplicateNameRel, checkRes)
 
                 # Пишем файл дифф в папку (для отладки)
                 # Только если дифф есть, иначе много пустых файлов образуется.
