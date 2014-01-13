@@ -480,8 +480,7 @@ class HostFolder:
                     )
 
 
-    # Создает
-    # внутенний для класса листинг дубликатов,
+    # Создает внутенний для класса листинг дубликатов,
     # папку оригинальных файлов (называется duplicates),
     def createDuplicates(self):
 
@@ -587,7 +586,7 @@ class HostFolder:
         )
 
         # Для каждого файла-оригинала
-        for fNameRel in self.originalListing[:-1]:
+        for fNameRel in self.originalListing:
             dstFName = os.path.join(self.destFolder, fNameRel)
 
             # Сначала заполняем словарь, парся наш файл - УРЛ на дубль -> УРЛ на оригинал
